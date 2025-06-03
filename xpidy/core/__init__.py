@@ -1,29 +1,35 @@
 """
-核心模块
+Xpidy 核心模块
 """
 
-from .config import (BrowserType, ExtractionConfig, LLMConfig, LLMProvider,
-                     SpiderConfig)
-from .llm_processor import LLMProcessor
-from .results import (CrawlResult, FormStats, ImageStats, LinkStats,
-                      PageMetadata, TableStats, create_error_result,
-                      create_success_result)
+from .config import SpiderConfig, ExtractionConfig, LLMConfig
 from .spider import Spider
+from .results import (
+    CrawlResult, 
+    FormStats, 
+    ImageStats, 
+    LinkStats, 
+    TableStats, 
+    PageMetadata,
+    create_error_result,
+    create_success_result
+)
+from .llm_processor import LLMProcessor, LLMStats, ContentProcessor
 
 __all__ = [
-    "Spider",
-    "LLMProcessor",
     "SpiderConfig",
+    "ExtractionConfig", 
     "LLMConfig",
-    "ExtractionConfig",
-    "BrowserType",
-    "LLMProvider",
+    "Spider",
     "CrawlResult",
-    "PageMetadata",
-    "LinkStats",
-    "ImageStats",
-    "TableStats",
     "FormStats",
+    "ImageStats", 
+    "LinkStats",
+    "TableStats",
+    "PageMetadata",
     "create_error_result",
     "create_success_result",
+    "LLMProcessor",
+    "LLMStats", 
+    "ContentProcessor",
 ]

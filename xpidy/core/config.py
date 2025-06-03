@@ -71,6 +71,24 @@ class LLMConfig(BaseModel):
     # 处理配置
     batch_size: int = Field(default=5, gt=0, description="批处理大小")
     timeout: int = Field(default=60, description="请求超时(秒)")
+    
+    # 优化配置
+    enable_cache: bool = Field(default=True, description="启用LLM缓存")
+    cache_ttl: int = Field(default=86400, description="缓存TTL(秒)")
+    max_input_tokens: int = Field(default=8000, description="最大输入token数")
+    max_concurrent_requests: int = Field(default=10, description="最大并发请求数")
+    request_interval: float = Field(default=0.1, description="请求间隔(秒)")
+    max_retries: int = Field(default=3, description="最大重试次数")
+    max_json_retries: int = Field(default=3, description="JSON解析最大重试次数")
+    enable_content_truncation: bool = Field(default=True, description="启用内容截断")
+    fallback_strategy: str = Field(default="original", description="降级策略")
+    
+    # 成本控制
+    max_daily_cost: float = Field(default=10.0, description="每日最大成本")
+    cost_per_token: float = Field(default=0.0001, description="每token成本")
+    
+    # 性能监控
+    enable_stats: bool = Field(default=True, description="启用统计监控")
 
 
 class ExtractionConfig(BaseModel):
