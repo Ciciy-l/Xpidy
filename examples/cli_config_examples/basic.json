@@ -1,0 +1,18 @@
+{
+  "spider_config": {
+    "headless": true,
+    "timeout": 30000,
+    "stealth_mode": true
+  },
+  "extraction_config": {
+    "extract_text": true,
+    "extract_metadata": true,
+    "normalize_whitespace": true
+  },
+  "tasks": [
+    {
+      "url": "https://httpbin.org/html",
+      "name": "httpbin_basic"
+    }
+  ]
+} 
