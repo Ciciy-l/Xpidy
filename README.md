@@ -1,3 +1,12 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Ciciy-l/Xpidy)
+[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://badge.fury.io/py/xpidy.svg)](https://badge.fury.io/py/xpidy)
+[![Downloads](https://pepy.tech/badge/xpidy)](https://pepy.tech/project/xpidy)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Playwright](https://img.shields.io/badge/playwright-enabled-brightgreen.svg)](https://playwright.dev/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+
 # Xpidy - 智能网页数据提取框架
 
 一个基于Playwright的现代化智能爬虫库，采用"配置驱动"设计理念，让网页数据提取变得极其简单。
@@ -19,6 +28,33 @@
 ### 安装
 
 ```bash
+# 方式1：使用uv安装（推荐）
+uv add xpidy
+
+# 方式2：使用pip安装
+pip install xpidy
+
+# 安装Playwright浏览器
+uv run playwright install
+# 或者如果使用pip安装的
+playwright install
+```
+
+### 验证安装
+
+```bash
+# 验证xpidy CLI工具
+xpidy --version
+
+# 验证Python导入
+python -c "from xpidy import Spider; print('Xpidy安装成功！')"
+```
+
+### 开发安装（仅限贡献者）
+
+如果你想参与开发或需要最新的开发版本：
+
+```bash
 # 安装uv（如果尚未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -37,7 +73,7 @@ uv run playwright install
 
 ```python
 import asyncio
-from xpidy import Spider
+from xpidy import Spider, XpidyConfig, ExtractionConfig
 
 async def main():
     # 快速创建爬虫实例
@@ -67,7 +103,7 @@ async def main():
         spider_config=SpiderConfig(
             headless=True,
             timeout=30000,
-            stealth_mode=True
+            enable_stealth=True
         ),
         extraction_config=ExtractionConfig(
             enable_text=True,
@@ -122,7 +158,7 @@ xpidy validate my_config.json
 xpidy run my_config.json --output results.json
 
 # 4. 快速爬取单个URL
-xpidy quick https://example.com --enable-links --enable-images
+xpidy quick https://example.com --enable-links --enable-images --enable-data
 ```
 
 ### 配置文件示例
@@ -132,12 +168,15 @@ xpidy quick https://example.com --enable-links --enable-images
   "spider_config": {
     "headless": true,
     "timeout": 30000,
-    "stealth_mode": true
+    "enable_stealth": true,
+    "delay": 1.0,
+    "retry_times": 3
   },
   "extraction_config": {
     "enable_text": true,
     "enable_links": true,
     "enable_images": true,
+    "enable_data": true,
     "text_config": {
       "min_text_length": 10,
       "extract_metadata": true
@@ -150,7 +189,8 @@ xpidy quick https://example.com --enable-links --enable-images
     "images_config": {
       "min_width": 100,
       "min_height": 100,
-      "max_items": 20
+      "max_items": 20,
+      "allowed_formats": ["jpg", "png", "gif"]
     }
   },
   "tasks": [
@@ -196,12 +236,13 @@ config = XpidyConfig(
         enable_text=True,
         enable_links=True,
         # 全局选择器限制
-        css_selector="main .content",  # 只在主内容区域提取
+        global_selectors=["main .content"],  # 只在主内容区域提取
+        global_exclude_selectors=[".ads"],  # 排除广告和侧边栏
         text_config={
-            "css_selector": "article p"  # 文本提取器专用选择器
+            "selectors": ["article p"]  # 文本提取器专用选择器
         },
         links_config={
-            "css_selector": "nav a, .sidebar a"  # 链接提取器专用选择器
+            "selectors": ["nav a", ".content a"]  # 链接提取器专用选择器
         }
     )
 )
@@ -215,7 +256,7 @@ config = XpidyConfig(...)
 config.save_to_file("my_config.json")
 
 # 从文件加载配置
-config = XpidyConfig.from_file("my_config.json")
+config = XpidyConfig.load_from_file("my_config.json")
 ```
 
 ### 3. LLM后处理（可选）
@@ -229,7 +270,9 @@ config = XpidyConfig(
         provider="openai",
         model="gpt-3.5-turbo", 
         api_key="your-api-key",
-        enabled=True
+        enabled=True,
+        temperature=0.7,
+        max_tokens=2000
     )
 )
 
@@ -252,9 +295,11 @@ urls = [
 
 async with Spider(config) as spider:
     # 并发处理多个URL
-    results = []
-    tasks = [spider.crawl(url) for url in urls]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = await spider.crawl_multiple_urls(
+        urls, 
+        max_concurrent=3,
+        delay_between_batches=1.0
+    )
 ```
 
 ## 🏗️ 架构设计
@@ -298,6 +343,9 @@ Xpidy/
 │   │   ├── cache.py            # 缓存管理
 │   │   ├── content_utils.py    # 内容处理工具
 │   │   ├── url_utils.py        # URL处理工具
+│   │   ├── stats.py            # 统计工具
+│   │   ├── proxy.py            # 代理工具
+│   │   ├── retry.py            # 重试工具
 │   │   └── __init__.py         # 工具模块导出
 │   ├── cli.py                  # 配置驱动的命令行工具
 │   └── __init__.py             # 包主入口
@@ -317,17 +365,18 @@ Xpidy/
 from xpidy import SpiderConfig
 
 spider_config = SpiderConfig(
-    browser_type="chromium",      # 浏览器类型: chromium/firefox/webkit
     headless=True,                # 无头模式
     timeout=30000,                # 超时时间(毫秒)
-    stealth_mode=True,            # 隐身模式
-    random_delay=True,            # 随机延迟
-    min_delay=0.5,                # 最小延迟(秒)
-    max_delay=2.0,                # 最大延迟(秒)
-    max_retries=3,                # 最大重试次数
     user_agent="custom-ua",       # 自定义UA
-    viewport_width=1920,          # 视口宽度
-    viewport_height=1080          # 视口高度
+    viewport={"width": 1920, "height": 1080},  # 视口大小
+    delay=1.0,                    # 请求间隔(秒)
+    retry_times=3,                # 最大重试次数
+    retry_delay=2.0,              # 重试间隔(秒)
+    enable_cache=True,            # 启用缓存
+    cache_ttl=3600,               # 缓存TTL(秒)
+    enable_stealth=True,          # 启用隐身模式
+    javascript_enabled=True,      # 启用JavaScript
+    images_enabled=True           # 启用图片加载
 )
 ```
 
@@ -345,8 +394,9 @@ extraction_config = ExtractionConfig(
     enable_form=True,
     
     # 全局选择器（影响所有提取器）
-    css_selector="main",          # CSS选择器范围限制
-    xpath_selector="//main",      # XPath选择器范围限制
+    global_selectors=["main"],    # CSS选择器范围限制
+    global_xpath_selectors=["//main"],  # XPath选择器范围限制
+    global_exclude_selectors=[".ads"],  # 排除选择器
     
     # 各提取器专用配置
     text_config={
@@ -389,8 +439,14 @@ llm_config = LLMConfig(
     provider="openai",            # 提供商: openai/anthropic
     model="gpt-3.5-turbo",        # 模型名称
     api_key="your-api-key",       # API密钥
-    temperature=0.1,              # 温度参数
-    max_tokens=2000               # 最大令牌数
+    base_url=None,                # API基础URL
+    temperature=0.7,              # 温度参数
+    max_tokens=2000,              # 最大令牌数
+    top_p=1.0,                    # top_p参数
+    enable_cache=True,            # 启用LLM缓存
+    cache_ttl=86400,              # 缓存TTL(秒)
+    batch_size=10,                # 批处理大小
+    max_retries=3                 # 最大重试次数
 )
 ```
 
@@ -403,10 +459,7 @@ source .venv/bin/activate  # Linux/Mac
 .venv\Scripts\activate     # Windows
 
 # 运行测试
-uv run pytest
-
-# 运行示例测试
-uv run python test_refactored.py
+uv run pytest tests/ -v
 
 # 测试CLI工具
 uv run xpidy init basic --output test_config.json
