@@ -4,8 +4,7 @@ URL工具类
 
 import re
 from typing import List, Optional, Set, Tuple
-from urllib.parse import (parse_qs, quote, unquote, urljoin, urlparse,
-                          urlunparse)
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 
 from loguru import logger
 

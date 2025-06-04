@@ -414,8 +414,8 @@ uv run xpidy validate test_config.json
 uv run xpidy run test_config.json
 
 # 代码格式化
-uvx run black .
-uvx run isort .
+uvx isort .
+uvx black .
 ```
 
 ## 📊 性能特性

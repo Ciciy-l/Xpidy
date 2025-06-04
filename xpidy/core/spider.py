@@ -7,12 +7,22 @@ import time
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from playwright.async_api import (Browser, BrowserContext, Page, Playwright,
-                                  async_playwright)
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
-from ..extractors import (ImageExtractor, ImageExtractorConfig, LinkExtractor,
-                          LinkExtractorConfig, TextExtractor,
-                          TextExtractorConfig)
+from ..extractors import (
+    ImageExtractor,
+    ImageExtractorConfig,
+    LinkExtractor,
+    LinkExtractorConfig,
+    TextExtractor,
+    TextExtractorConfig,
+)
 from .config import ExtractionConfig, LLMConfig, SpiderConfig, XpidyConfig
 
 
@@ -62,8 +72,7 @@ class Spider:
 
         # 数据提取器（新增）
         if extraction_config.enable_data:
-            from ..extractors.data_extractor import (DataExtractor,
-                                                     DataExtractorConfig)
+            from ..extractors.data_extractor import DataExtractor, DataExtractorConfig
 
             data_config = self._merge_extractor_config(
                 DataExtractorConfig(), extraction_config.data_config
@@ -72,8 +81,7 @@ class Spider:
 
         # 表单提取器（新增）
         if extraction_config.enable_form:
-            from ..extractors.form_extractor import (FormExtractor,
-                                                     FormExtractorConfig)
+            from ..extractors.form_extractor import FormExtractor, FormExtractorConfig
 
             form_config = self._merge_extractor_config(
                 FormExtractorConfig(), extraction_config.form_config
