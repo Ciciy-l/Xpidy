@@ -5,45 +5,333 @@
 import base64
 import time
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 from playwright.async_api import Page
+from pydantic import Field
 
 from ..utils.url_utils import URLUtils
-from .base_extractor import BaseExtractor
+from .base_extractor import BaseExtractor, BaseExtractorConfig
+
+
+class ImageExtractorConfig(BaseExtractorConfig):
+    """图片提取器配置"""
+
+    # 尺寸过滤
+    min_width: int = Field(default=0, description="最小宽度")
+    min_height: int = Field(default=0, description="最小高度")
+    min_area: int = Field(default=0, description="最小面积")
+
+    # 格式过滤
+    allowed_formats: List[str] = Field(
+        default_factory=lambda: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"],
+        description="允许的图片格式",
+    )
+    exclude_formats: List[str] = Field(
+        default_factory=list, description="排除的图片格式"
+    )
+
+    # 属性提取
+    extract_alt: bool = Field(default=True, description="提取alt属性")
+    extract_title: bool = Field(default=True, description="提取title属性")
+    extract_dimensions: bool = Field(default=True, description="提取尺寸信息")
+    extract_lazy_load: bool = Field(default=True, description="提取懒加载属性")
+
+    # 特殊过滤
+    exclude_base64: bool = Field(default=True, description="排除base64图片")
+    exclude_small_images: bool = Field(default=True, description="排除小图片（如图标）")
+    exclude_tracking_pixels: bool = Field(default=True, description="排除跟踪像素")
 
 
 class ImageExtractor(BaseExtractor):
     """图片提取器"""
 
+    def __init__(self, config: Optional[ImageExtractorConfig] = None):
+        super().__init__(config)
+
+    @classmethod
+    def get_default_config(cls) -> ImageExtractorConfig:
+        """获取默认配置"""
+        return ImageExtractorConfig()
+
     async def extract(self, page: Page, **kwargs) -> Dict[str, Any]:
         """提取页面中的所有图片"""
+        current_url = page.url
+
+        # 获取提取范围
+        extraction_scopes = await self._get_extraction_scope(page)
+
+        all_images = []
+        for scope in extraction_scopes:
+            scope_images = await self._extract_images_from_scope(scope, current_url)
+            all_images.extend(scope_images)
+
+        # 过滤和处理图片
+        filtered_images = self._filter_and_deduplicate_items(
+            all_images, current_url, url_key="src"
+        )
+
+        # 统计信息
+        stats = self._generate_stats(filtered_images)
+
+        return {
+            "url": current_url,
+            "images": filtered_images,
+            "total_images": len(filtered_images),
+            "stats": stats,
+            "timestamp": time.time(),
+            "extraction_method": "image_extractor",
+        }
+
+    async def _extract_images_from_scope(
+        self, scope, base_url: str
+    ) -> List[Dict[str, Any]]:
+        """从指定范围提取图片"""
         try:
-            current_url = page.url
-            images = await self._extract_images(page)
+            if hasattr(scope, "query_selector_all"):
+                # 这是一个页面
+                images_data = await scope.evaluate(
+                    """
+                    () => {
+                        const images = [];
+                        const imgElements = document.querySelectorAll('img');
+                        
+                        imgElements.forEach(img => {
+                            const data = {
+                                src: img.src || img.getAttribute('src') || '',
+                                alt: img.alt || '',
+                                title: img.title || '',
+                                width: img.naturalWidth || img.width || 0,
+                                height: img.naturalHeight || img.height || 0,
+                                loading: img.loading || '',
+                                className: img.className || '',
+                                id: img.id || ''
+                            };
+                            
+                            // 懒加载属性
+                            const dataSrc = img.getAttribute('data-src') || 
+                                          img.getAttribute('data-original') ||
+                                          img.getAttribute('data-lazy');
+                            if (dataSrc) {
+                                data.dataSrc = dataSrc;
+                                data.isLazy = true;
+                            }
+                            
+                            // srcset属性
+                            if (img.srcset) {
+                                data.srcset = img.srcset;
+                            }
+                            
+                            images.push(data);
+                        });
+                        
+                        return images;
+                    }
+                """
+                )
+            else:
+                # 这是一个元素句柄
+                images_data = await scope.evaluate(
+                    """
+                    (element) => {
+                        const images = [];
+                        const imgElements = element.querySelectorAll('img');
+                        
+                        imgElements.forEach(img => {
+                            const data = {
+                                src: img.src || img.getAttribute('src') || '',
+                                alt: img.alt || '',
+                                title: img.title || '',
+                                width: img.naturalWidth || img.width || 0,
+                                height: img.naturalHeight || img.height || 0,
+                                loading: img.loading || '',
+                                className: img.className || '',
+                                id: img.id || ''
+                            };
+                            
+                            const dataSrc = img.getAttribute('data-src') || 
+                                          img.getAttribute('data-original') ||
+                                          img.getAttribute('data-lazy');
+                            if (dataSrc) {
+                                data.dataSrc = dataSrc;
+                                data.isLazy = true;
+                            }
+                            
+                            if (img.srcset) {
+                                data.srcset = img.srcset;
+                            }
+                            
+                            images.push(data);
+                        });
+                        
+                        return images;
+                    }
+                """
+                )
 
-            # 处理和过滤图片
-            processed_images = await self._process_images(images, current_url, **kwargs)
+            processed_images = []
+            for image_data in images_data or []:
+                processed_image = await self._process_image(image_data, base_url)
+                if processed_image:
+                    processed_images.append(processed_image)
 
-            # 提取额外信息
-            metadata = await self._extract_metadata(page)
+            return processed_images
 
-            result = {
-                "url": current_url,
-                "images": processed_images,
-                "total_images": len(processed_images),
-                "metadata": metadata,
-                "timestamp": time.time(),
-                "extraction_method": "image_extractor",
-            }
+        except Exception:
+            return []
 
-            logger.info(f"提取到 {len(processed_images)} 张图片")
-            return result
+    async def _process_image(
+        self, image_data: Dict[str, Any], base_url: str
+    ) -> Optional[Dict[str, Any]]:
+        """处理单个图片"""
+        src = image_data.get("src", "").strip()
+        if not src:
+            # 检查懒加载src
+            src = image_data.get("dataSrc", "").strip()
+            if not src:
+                return None
 
-        except Exception as e:
-            logger.error(f"图片提取失败: {e}")
-            raise
+        # 排除base64图片
+        if self.config.exclude_base64 and src.startswith("data:"):
+            return None
+
+        # 转换为绝对URL
+        absolute_url = urljoin(base_url, src)
+        parsed_url = urlparse(absolute_url)
+
+        # 获取文件扩展名
+        file_extension = self._get_file_extension(absolute_url)
+
+        # 格式过滤
+        if (
+            self.config.allowed_formats
+            and file_extension not in self.config.allowed_formats
+        ):
+            return None
+        if file_extension in self.config.exclude_formats:
+            return None
+
+        # 尺寸过滤
+        width = image_data.get("width", 0)
+        height = image_data.get("height", 0)
+
+        if width < self.config.min_width or height < self.config.min_height:
+            return None
+
+        if self.config.min_area > 0 and (width * height) < self.config.min_area:
+            return None
+
+        # 排除小图片（如图标）
+        if self.config.exclude_small_images and width <= 16 and height <= 16:
+            return None
+
+        # 排除跟踪像素
+        if self.config.exclude_tracking_pixels and width == 1 and height == 1:
+            return None
+
+        # 构建结果
+        result = {
+            "src": absolute_url,
+            "original_src": image_data.get("src", ""),
+            "file_extension": file_extension,
+            "domain": parsed_url.netloc,
+        }
+
+        if self.config.extract_dimensions:
+            result.update(
+                {
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                    "aspect_ratio": round(width / height, 2) if height > 0 else 0,
+                }
+            )
+
+        if self.config.extract_alt:
+            result["alt"] = image_data.get("alt", "")
+
+        if self.config.extract_title:
+            result["title"] = image_data.get("title", "")
+
+        if self.config.extract_lazy_load:
+            result["is_lazy"] = image_data.get("isLazy", False)
+            if image_data.get("dataSrc"):
+                result["data_src"] = image_data["dataSrc"]
+
+        # 其他属性
+        for attr in ["loading", "className", "id", "srcset"]:
+            if image_data.get(attr):
+                result[attr] = image_data[attr]
+
+        return result
+
+    def _get_file_extension(self, url: str) -> str:
+        """获取文件扩展名"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        if "." in path:
+            extension = path.split(".")[-1]
+            # 去除查询参数
+            return extension.split("?")[0]
+        return ""
+
+    def _generate_stats(self, images: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """生成统计信息"""
+        if not images:
+            return {}
+
+        stats = {
+            "by_format": {},
+            "by_domain": {},
+            "size_distribution": {
+                "small": 0,  # < 100x100
+                "medium": 0,  # 100x100 - 500x500
+                "large": 0,  # > 500x500
+            },
+            "lazy_loaded": sum(1 for img in images if img.get("is_lazy", False)),
+            "with_alt": sum(1 for img in images if img.get("alt", "")),
+            "total_area": sum(img.get("area", 0) for img in images),
+        }
+
+        for image in images:
+            # 按格式统计
+            ext = image.get("file_extension", "unknown")
+            stats["by_format"][ext] = stats["by_format"].get(ext, 0) + 1
+
+            # 按域名统计
+            domain = image.get("domain", "unknown")
+            stats["by_domain"][domain] = stats["by_domain"].get(domain, 0) + 1
+
+            # 尺寸分布
+            width = image.get("width", 0)
+            height = image.get("height", 0)
+            if width < 100 or height < 100:
+                stats["size_distribution"]["small"] += 1
+            elif width <= 500 and height <= 500:
+                stats["size_distribution"]["medium"] += 1
+            else:
+                stats["size_distribution"]["large"] += 1
+
+        return stats
+
+    def _apply_custom_filters(self, item: Dict[str, Any], **filters) -> bool:
+        """应用自定义过滤器"""
+        # 文件大小过滤（如果提供）
+        if filters.get("max_file_size"):
+            # 这里可以添加实际的文件大小检查逻辑
+            pass
+
+        # 文件名过滤
+        if filters.get("filename_patterns"):
+            src = item.get("src", "")
+            import re
+
+            patterns = filters["filename_patterns"]
+            if not any(re.search(pattern, src, re.IGNORECASE) for pattern in patterns):
+                return False
+
+        return True
 
     async def extract_by_size(
         self, page: Page, min_width: int = 0, min_height: int = 0, **kwargs
@@ -176,108 +464,6 @@ class ImageExtractor(BaseExtractor):
         except Exception as e:
             logger.warning(f"JavaScript图片提取失败，使用备用方法: {e}")
             return await super()._extract_images(page)
-
-    def _apply_custom_filters(self, item: Dict[str, Any], **filters) -> bool:
-        """应用图片特定的过滤器"""
-        # 尺寸过滤
-        min_width = filters.get("min_width", 0)
-        min_height = filters.get("min_height", 0)
-        width = item.get("width", 0)
-        height = item.get("height", 0)
-
-        if width < min_width or height < min_height:
-            return False
-
-        # 格式过滤
-        allowed_formats = filters.get("allowed_formats", [])
-        if allowed_formats:
-            file_extension = URLUtils.get_file_extension_from_url(item.get("url", ""))
-            if file_extension and file_extension.lower() not in allowed_formats:
-                return False
-
-        return True
-
-    async def _process_images(
-        self, images: List[Dict[str, Any]], base_url: str, **kwargs
-    ) -> List[Dict[str, Any]]:
-        """处理和过滤图片"""
-        # 预处理：添加原始src信息和处理特殊类型
-        processed_images = []
-        for image in images:
-            # 处理SVG图像
-            if image.get("type") == "svg":
-                processed_image = await self._process_svg_image(
-                    image, base_url, **kwargs
-                )
-                if processed_image:
-                    processed_images.append(processed_image)
-                continue
-
-            # 跳过没有src的图片
-            if not image.get("src"):
-                continue
-
-            image["original_src"] = image.get("src", "")
-            processed_images.append(image)
-
-        # 使用基类的通用过滤方法
-        filtered = self._filter_and_deduplicate_items(
-            processed_images,
-            base_url,
-            url_key="src",
-            deduplicate=kwargs.get("deduplicate", True),
-            max_items=kwargs.get("max_images"),
-            exclude_patterns=kwargs.get("exclude_patterns", []),
-            **kwargs,
-        )
-
-        # 添加图片特定的元数据
-        for image in filtered:
-            # 重命名src为url以保持一致性
-            image["url"] = image.pop("src")
-
-            # 计算图片特定属性
-            width = image.get("width", 0)
-            height = image.get("height", 0)
-
-            image.update(
-                {
-                    "aspect_ratio": round(width / height, 2) if height > 0 else 0,
-                    "display_width": image.get("displayWidth", 0),
-                    "display_height": image.get("displayHeight", 0),
-                    "type": image.get("type", "img"),
-                    "className": image.get("className", ""),
-                    "id": image.get("id", ""),
-                    "loading": image.get("loading", ""),
-                    "srcset": image.get("srcset", ""),
-                    "sizes": image.get("sizes", ""),
-                    "parentTag": image.get("parentTag", ""),
-                    "parentClass": image.get("parentClass", ""),
-                    "linkUrl": image.get("linkUrl", ""),
-                    "linkText": image.get("linkText", ""),
-                    "caption": image.get("caption", ""),
-                    "is_large": width >= 500 or height >= 500,
-                    "is_small": width <= 50 or height <= 50,
-                    "is_square": (
-                        abs(width - height) <= 10 if width > 0 and height > 0 else False
-                    ),
-                    "is_landscape": (
-                        width > height if width > 0 and height > 0 else False
-                    ),
-                    "is_portrait": (
-                        height > width if width > 0 and height > 0 else False
-                    ),
-                }
-            )
-
-            # 添加详细元数据
-            if kwargs.get("include_detailed_metadata", False):
-                image.update(await self._get_detailed_metadata(image["url"]))
-
-        # 添加URL元数据
-        self._add_url_metadata(filtered, base_url, url_key="url")
-
-        return filtered
 
     async def _process_svg_image(
         self, svg_image: Dict[str, Any], base_url: str, **kwargs

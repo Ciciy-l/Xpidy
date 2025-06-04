@@ -2,53 +2,256 @@
 链接提取器
 """
 
+import re
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 from playwright.async_api import Page
+from pydantic import Field
 
 from ..utils import URLUtils
-from .base_extractor import BaseExtractor
+from .base_extractor import BaseExtractor, BaseExtractorConfig
+
+
+class LinkExtractorConfig(BaseExtractorConfig):
+    """链接提取器配置"""
+
+    # 链接类型
+    include_internal: bool = Field(default=True, description="包含内部链接")
+    include_external: bool = Field(default=True, description="包含外部链接")
+
+    # 过滤规则
+    include_patterns: List[str] = Field(
+        default_factory=list, description="包含的URL模式"
+    )
+    exclude_patterns: List[str] = Field(
+        default_factory=list, description="排除的URL模式"
+    )
+    allowed_schemes: List[str] = Field(
+        default_factory=lambda: ["http", "https"], description="允许的协议"
+    )
+
+    # 链接属性
+    extract_text: bool = Field(default=True, description="提取链接文本")
+    extract_title: bool = Field(default=True, description="提取链接标题")
+    extract_anchor: bool = Field(default=True, description="提取锚点")
+
+    # 文件类型过滤
+    include_file_types: List[str] = Field(
+        default_factory=list, description="包含的文件类型"
+    )
+    exclude_file_types: List[str] = Field(
+        default_factory=lambda: ["pdf", "doc", "docx", "xls", "xlsx"],
+        description="排除的文件类型",
+    )
 
 
 class LinkExtractor(BaseExtractor):
     """链接提取器"""
 
+    def __init__(self, config: Optional[LinkExtractorConfig] = None):
+        super().__init__(config)
+
+    @classmethod
+    def get_default_config(cls) -> LinkExtractorConfig:
+        """获取默认配置"""
+        return LinkExtractorConfig()
+
     async def extract(self, page: Page, **kwargs) -> Dict[str, Any]:
-        """提取链接数据"""
+        """提取页面中的所有链接"""
+        current_url = page.url
+        base_domain = urlparse(current_url).netloc
+
+        # 获取提取范围
+        extraction_scopes = await self._get_extraction_scope(page)
+
+        all_links = []
+        for scope in extraction_scopes:
+            scope_links = await self._extract_links_from_scope(scope, current_url)
+            all_links.extend(scope_links)
+
+        # 过滤和处理链接
+        filtered_links = self._filter_and_deduplicate_items(
+            all_links, current_url, url_key="url"
+        )
+
+        # 分类统计
+        internal_count = sum(
+            1 for link in filtered_links if link.get("is_internal", False)
+        )
+        external_count = len(filtered_links) - internal_count
+
+        return {
+            "url": current_url,
+            "links": filtered_links,
+            "total_links": len(filtered_links),
+            "internal_links": internal_count,
+            "external_links": external_count,
+            "timestamp": time.time(),
+            "extraction_method": "link_extractor",
+        }
+
+    async def _extract_links_from_scope(
+        self, scope, base_url: str
+    ) -> List[Dict[str, Any]]:
+        """从指定范围提取链接"""
         try:
-            # 获取页面URL
-            current_url = page.url
+            if hasattr(scope, "query_selector_all"):
+                # 这是一个页面或元素
+                links_data = await scope.evaluate(
+                    """
+                    () => {
+                        return Array.from(document.querySelectorAll('a[href]')).map(link => ({
+                            url: link.href,
+                            text: link.textContent?.trim() || '',
+                            title: link.title || '',
+                            rel: link.rel || '',
+                            target: link.target || '',
+                            download: link.download || ''
+                        }));
+                    }
+                """
+                )
+            else:
+                # 这是一个元素句柄
+                links_data = await scope.evaluate(
+                    """
+                    (element) => {
+                        return Array.from(element.querySelectorAll('a[href]')).map(link => ({
+                            url: link.href,
+                            text: link.textContent?.trim() || '',
+                            title: link.title || '',
+                            rel: link.rel || '',
+                            target: link.target || '',
+                            download: link.download || ''
+                        }));
+                    }
+                """
+                )
 
-            # 提取链接
-            links = await self._extract_links(page)
+            processed_links = []
+            for link_data in links_data or []:
+                processed_link = await self._process_link(link_data, base_url)
+                if processed_link:
+                    processed_links.append(processed_link)
 
-            # 处理链接
-            processed_links = await self._process_links(links, current_url, **kwargs)
+            return processed_links
 
-            # 统计信息
-            internal_links = [link for link in processed_links if link["is_internal"]]
-            external_links = [
-                link for link in processed_links if not link["is_internal"]
-            ]
+        except Exception:
+            return []
 
-            return {
-                "url": current_url,
-                "links": processed_links,
-                "internal_links": internal_links,
-                "external_links": external_links,
-                "total_links": len(processed_links),
-                "total_internal_links": len(internal_links),
-                "total_external_links": len(external_links),
-                "extraction_method": "enhanced",
-                "timestamp": time.time(),
-            }
+    async def _process_link(
+        self, link_data: Dict[str, Any], base_url: str
+    ) -> Optional[Dict[str, Any]]:
+        """处理单个链接"""
+        url = link_data.get("url", "").strip()
+        if not url:
+            return None
 
-        except Exception as e:
-            logger.error(f"链接提取失败: {e}")
-            raise
+        # 转换为绝对URL
+        absolute_url = urljoin(base_url, url)
+        parsed_url = urlparse(absolute_url)
+        base_domain = urlparse(base_url).netloc
+
+        # 验证协议
+        if parsed_url.scheme not in self.config.allowed_schemes:
+            return None
+
+        # 判断内外部链接
+        is_internal = parsed_url.netloc == base_domain
+
+        # 过滤内外部链接
+        if not self.config.include_internal and is_internal:
+            return None
+        if not self.config.include_external and not is_internal:
+            return None
+
+        # 文件类型过滤
+        file_extension = self._get_file_extension(absolute_url)
+        if (
+            self.config.include_file_types
+            and file_extension not in self.config.include_file_types
+        ):
+            return None
+        if file_extension in self.config.exclude_file_types:
+            return None
+
+        # URL模式过滤
+        if not self._matches_patterns(absolute_url):
+            return None
+
+        # 构建结果
+        result = {
+            "url": absolute_url,
+            "original_url": url,
+            "is_internal": is_internal,
+            "domain": parsed_url.netloc,
+            "path": parsed_url.path,
+            "file_extension": file_extension,
+            "scheme": parsed_url.scheme,
+        }
+
+        if self.config.extract_text:
+            result["text"] = link_data.get("text", "")
+
+        if self.config.extract_title:
+            result["title"] = link_data.get("title", "")
+
+        if self.config.extract_anchor:
+            result["anchor"] = parsed_url.fragment
+
+        # 其他属性
+        for attr in ["rel", "target", "download"]:
+            if link_data.get(attr):
+                result[attr] = link_data[attr]
+
+        return result
+
+    def _get_file_extension(self, url: str) -> str:
+        """获取文件扩展名"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        if "." in path:
+            return path.split(".")[-1]
+        return ""
+
+    def _matches_patterns(self, url: str) -> bool:
+        """检查URL是否匹配模式"""
+        # 检查包含模式
+        if self.config.include_patterns:
+            if not any(
+                re.search(pattern, url, re.IGNORECASE)
+                for pattern in self.config.include_patterns
+            ):
+                return False
+
+        # 检查排除模式
+        if self.config.exclude_patterns:
+            if any(
+                re.search(pattern, url, re.IGNORECASE)
+                for pattern in self.config.exclude_patterns
+            ):
+                return False
+
+        return True
+
+    def _apply_custom_filters(self, item: Dict[str, Any], **filters) -> bool:
+        """应用自定义过滤器"""
+        # 文本长度过滤
+        if filters.get("min_text_length"):
+            text = item.get("text", "")
+            if len(text.strip()) < filters["min_text_length"]:
+                return False
+
+        # 域名过滤
+        if filters.get("allowed_domains"):
+            domain = item.get("domain", "")
+            if domain not in filters["allowed_domains"]:
+                return False
+
+        return True
 
     async def extract_internal_links(self, page: Page, **kwargs) -> Dict[str, Any]:
         """只提取内部链接"""
@@ -66,114 +269,6 @@ class LinkExtractor(BaseExtractor):
         """根据URL模式提取链接"""
         kwargs["url_pattern"] = pattern
         return await self.extract(page, **kwargs)
-
-    async def _extract_links(self, page: Page) -> List[Dict[str, str]]:
-        """重写基类方法，增强链接提取功能"""
-        try:
-            links = await page.evaluate(
-                """
-                () => {
-                    const links = [];
-                    const linkElements = document.querySelectorAll('a[href]');
-                    
-                    linkElements.forEach(link => {
-                        // 基本信息
-                        const linkData = {
-                            text: link.textContent?.trim() || '',
-                            href: link.href,
-                            title: link.title || '',
-                            target: link.target || '',
-                            rel: link.rel || '',
-                            download: link.download || '',
-                            className: link.className || '',
-                            id: link.id || ''
-                        };
-                        
-                        // 父元素信息
-                        const parent = link.parentElement;
-                        if (parent) {
-                            linkData.parentTag = parent.tagName.toLowerCase();
-                            linkData.parentClass = parent.className || '';
-                        }
-                        
-                        // 检查是否在导航区域
-                        linkData.inNavigation = !!link.closest('nav, .nav, .navigation, .menu, header, .header');
-                        
-                        // 检查是否在主要内容区域
-                        linkData.inMainContent = !!link.closest('main, .main, .content, article, .article');
-                        
-                        links.push(linkData);
-                    });
-                    
-                    return links;
-                }
-            """
-            )
-            return links or []
-        except Exception as e:
-            logger.warning(f"JavaScript链接提取失败，使用备用方法: {e}")
-            return await super()._extract_links(page)
-
-    def _apply_custom_filters(self, item: Dict[str, Any], **filters) -> bool:
-        """应用链接特定的过滤器"""
-        # 内部/外部链接过滤
-        only_internal = filters.get("only_internal", False)
-        only_external = filters.get("only_external", False)
-
-        if only_internal and not item.get("is_internal", False):
-            return False
-        if only_external and item.get("is_internal", False):
-            return False
-
-        # URL模式过滤
-        url_pattern = filters.get("url_pattern")
-        if url_pattern:
-            import re
-
-            if not re.search(url_pattern, item.get("url", ""), re.IGNORECASE):
-                return False
-
-        # 媒体文件过滤
-        include_media = filters.get("include_media", True)
-        if not include_media and URLUtils.is_media_url(item.get("url", "")):
-            return False
-
-        return True
-
-    async def _process_links(
-        self, links: List[Dict[str, str]], base_url: str, **kwargs
-    ) -> List[Dict[str, Any]]:
-        """处理和过滤链接"""
-        # 预处理：添加原始href信息
-        for link in links:
-            link["original_href"] = link.get("href", "")
-
-        # 使用基类的通用过滤方法
-        processed = self._filter_and_deduplicate_items(
-            links,
-            base_url,
-            url_key="href",
-            deduplicate=kwargs.get("deduplicate", True),
-            max_items=kwargs.get("max_links"),
-            exclude_patterns=kwargs.get("exclude_patterns", []),
-            **kwargs,
-        )
-
-        # 添加链接特定的元数据
-        for link in processed:
-            # 重命名href为url以保持一致性
-            link["url"] = link.pop("href")
-
-            # 清理文本
-            link["text"] = await self._clean_text(link.get("text", ""))
-
-            # 添加链接特定的属性
-            link["is_media"] = URLUtils.is_media_url(link["url"])
-
-        # 添加URL元数据
-        self._add_url_metadata(processed, base_url, url_key="url")
-
-        return processed
 
     async def extract_sitemap_links(self, page: Page) -> Dict[str, Any]:
         """尝试从sitemap.xml提取链接"""

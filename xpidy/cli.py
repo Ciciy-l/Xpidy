@@ -6,14 +6,12 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import click
-from loguru import logger
 
-from . import (ExtractionConfig, LLMConfig, Spider, SpiderConfig, quick_crawl,
-               quick_crawl_batch)
-from .utils import ContentUtils, URLUtils
+from . import Spider, XpidyConfig
+from .utils import URLUtils
 
 
 @click.group()
@@ -41,10 +39,11 @@ def run(config_file: str, output: Optional[str], dry_run: bool):
         "timeout": 30000
       },
       "extraction_config": {
-        "extract_text": true,
-        "extract_links": true,
-        "extract_images": true,
-        "max_links": 20
+        "enable_text": true,
+        "enable_links": true,
+        "enable_images": true,
+        "text_config": {"min_text_length": 10},
+        "links_config": {"max_items": 20}
       },
       "tasks": [
         {
@@ -64,23 +63,23 @@ def run(config_file: str, output: Optional[str], dry_run: bool):
                 sys.exit(1)
 
             with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+                config_data = json.load(f)
 
-            # 解析配置
-            spider_config = SpiderConfig(**config.get("spider_config", {}))
-            extraction_config = ExtractionConfig(**config.get("extraction_config", {}))
-            llm_config = None
-            if "llm_config" in config:
-                llm_config = LLMConfig(**config["llm_config"])
+            # 解析配置 - 使用新的统一配置
+            try:
+                config = XpidyConfig.from_dict(config_data)
+            except Exception as e:
+                click.echo(f"❌ 配置解析失败: {e}", err=True)
+                sys.exit(1)
 
-            tasks = config.get("tasks", [])
+            tasks = config_data.get("tasks", [])
 
             if dry_run:
                 click.echo("🔍 配置预览:")
-                click.echo(f"  爬虫配置: {spider_config}")
-                click.echo(f"  提取配置: {extraction_config}")
-                if llm_config:
-                    click.echo(f"  LLM配置: {llm_config}")
+                click.echo(f"  爬虫配置: {config.spider_config}")
+                click.echo(f"  提取配置: {config.extraction_config}")
+                if config.llm_config.enabled:
+                    click.echo(f"  LLM配置: {config.llm_config}")
                 click.echo(f"  任务数量: {len(tasks)}")
                 return
 
@@ -91,11 +90,7 @@ def run(config_file: str, output: Optional[str], dry_run: bool):
             # 执行任务
             click.echo(f"🚀 开始执行 {len(tasks)} 个任务")
 
-            async with Spider(
-                spider_config=spider_config,
-                extraction_config=extraction_config,
-                llm_config=llm_config,
-            ) as spider:
+            async with Spider(config) as spider:
                 results = {}
 
                 for i, task in enumerate(tasks, 1):
@@ -106,16 +101,24 @@ def run(config_file: str, output: Optional[str], dry_run: bool):
                         click.echo(f"📥 ({i}/{len(tasks)}) 处理: {name} - {url}")
 
                         # 任务级别的配置覆盖
-                        task_kwargs = task.get("options", {})
+                        task_options = task.get("options", {})
+                        prompt = task_options.get("prompt")
 
-                        result = await spider.crawl(url, **task_kwargs)
+                        result = await spider.crawl(url, prompt=prompt)
+
+                        # 判断成功状态
+                        success = "error" not in result
+
                         results[name] = {
                             "url": url,
-                            "success": result.success,
-                            "data": result.to_dict(),
+                            "success": success,
+                            "data": result,
                         }
 
-                        click.echo(f"✅ 完成: {name}")
+                        if success:
+                            click.echo(f"✅ 完成: {name}")
+                        else:
+                            click.echo(f"⚠️ 部分完成: {name}")
 
                     except Exception as e:
                         click.echo(f"❌ 失败: {name} - {e}")
@@ -143,7 +146,7 @@ def run(config_file: str, output: Optional[str], dry_run: bool):
 @cli.command()
 @click.argument(
     "template_name",
-    type=click.Choice(["basic", "links", "images", "comprehensive", "llm"]),
+    type=click.Choice(["basic", "links", "images", "comprehensive", "data", "form"]),
 )
 @click.option("--output", "-o", default="xpidy_config.json", help="配置文件输出路径")
 def init(template_name: str, output: str):
@@ -154,92 +157,91 @@ def init(template_name: str, output: str):
     - links: 链接提取
     - images: 图片提取
     - comprehensive: 全面提取
-    - llm: LLM增强提取
+    - data: 结构化数据提取
+    - form: 表单数据提取
     """
     templates = {
         "basic": {
-            "spider_config": {"headless": True, "timeout": 30000, "stealth_mode": True},
-            "extraction_config": {"extract_text": True, "extract_metadata": True},
+            "spider_config": {"headless": True, "timeout": 30000},
+            "extraction_config": {
+                "enable_text": True,
+                "text_config": {"extract_metadata": True, "min_text_length": 10},
+            },
             "tasks": [{"url": "https://example.com", "name": "example_basic"}],
         },
         "links": {
             "spider_config": {"headless": True, "timeout": 30000},
             "extraction_config": {
-                "extract_text": True,
-                "extract_links": True,
-                "extract_internal_links": True,
-                "extract_external_links": True,
-                "max_links": 50,
+                "enable_text": True,
+                "enable_links": True,
+                "links_config": {
+                    "include_internal": True,
+                    "include_external": True,
+                    "max_items": 50,
+                },
             },
-            "tasks": [
-                {
-                    "url": "https://example.com",
-                    "name": "example_links",
-                    "options": {"deduplicate": True, "include_media": False},
-                }
-            ],
+            "tasks": [{"url": "https://example.com", "name": "example_links"}],
         },
         "images": {
             "spider_config": {"headless": True, "timeout": 30000},
             "extraction_config": {
-                "extract_text": True,
-                "extract_images": True,
-                "min_image_width": 100,
-                "min_image_height": 100,
-                "max_images": 20,
-                "image_formats": ["jpg", "png", "gif"],
+                "enable_text": True,
+                "enable_images": True,
+                "images_config": {
+                    "min_width": 100,
+                    "min_height": 100,
+                    "max_items": 20,
+                    "allowed_formats": ["jpg", "png", "gif"],
+                },
             },
             "tasks": [{"url": "https://example.com", "name": "example_images"}],
         },
         "comprehensive": {
-            "spider_config": {"headless": True, "timeout": 30000, "stealth_mode": True},
+            "spider_config": {"headless": True, "timeout": 30000},
             "extraction_config": {
-                "extract_text": True,
-                "extract_links": True,
-                "extract_images": True,
-                "extract_structured_data": True,
-                "extract_tables": True,
-                "extract_forms": True,
-                "max_links": 100,
-                "max_images": 30,
+                "enable_text": True,
+                "enable_links": True,
+                "enable_images": True,
+                "enable_data": True,
+                "enable_form": True,
+                "text_config": {"extract_metadata": True},
+                "links_config": {"max_items": 100},
+                "images_config": {"max_items": 30},
+                "data_config": {"extract_json_ld": True, "extract_tables": True},
+                "form_config": {"extract_input_fields": True},
             },
             "tasks": [
                 {"url": "https://example.com", "name": "comprehensive_extraction"}
             ],
         },
-        "llm": {
+        "data": {
             "spider_config": {"headless": True, "timeout": 30000},
             "extraction_config": {
-                "extract_text": True,
-                "enable_llm_processing": True,
-                "structured_output": True,
+                "enable_text": True,
+                "enable_data": True,
+                "data_config": {
+                    "extract_json_ld": True,
+                    "extract_microdata": True,
+                    "extract_opengraph": True,
+                    "extract_tables": True,
+                    "extract_lists": True,
+                },
             },
-            "llm_config": {
-                "provider": "openai",
-                "model": "gpt-3.5-turbo",
-                "api_key": "your-api-key-here",
-                "temperature": 0.1,
+            "tasks": [{"url": "https://example.com", "name": "data_extraction"}],
+        },
+        "form": {
+            "spider_config": {"headless": True, "timeout": 30000},
+            "extraction_config": {
+                "enable_text": True,
+                "enable_form": True,
+                "form_config": {
+                    "extract_input_fields": True,
+                    "extract_buttons": True,
+                    "extract_selects": True,
+                    "include_hidden_fields": False,
+                },
             },
-            "tasks": [
-                {
-                    "url": "https://example.com",
-                    "name": "llm_extraction",
-                    "options": {
-                        "custom_prompt": "提取这个页面的主要信息",
-                        "output_schema": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"},
-                                "summary": {"type": "string"},
-                                "key_points": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                            },
-                        },
-                    },
-                }
-            ],
+            "tasks": [{"url": "https://example.com", "name": "form_extraction"}],
         },
     }
 
@@ -267,34 +269,18 @@ def validate(config_file: str):
             sys.exit(1)
 
         with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+            config_data = json.load(f)
 
         # 验证配置结构
         errors = []
 
-        # 验证spider_config
-        if "spider_config" in config:
-            try:
-                SpiderConfig(**config["spider_config"])
-            except Exception as e:
-                errors.append(f"spider_config 错误: {e}")
-
-        # 验证extraction_config
-        if "extraction_config" in config:
-            try:
-                ExtractionConfig(**config["extraction_config"])
-            except Exception as e:
-                errors.append(f"extraction_config 错误: {e}")
-
-        # 验证llm_config
-        if "llm_config" in config:
-            try:
-                LLMConfig(**config["llm_config"])
-            except Exception as e:
-                errors.append(f"llm_config 错误: {e}")
+        try:
+            config = XpidyConfig.from_dict(config_data)
+        except Exception as e:
+            errors.append(f"配置格式错误: {e}")
 
         # 验证tasks
-        tasks = config.get("tasks", [])
+        tasks = config_data.get("tasks", [])
         if not tasks:
             errors.append("tasks 不能为空")
 
@@ -313,6 +299,21 @@ def validate(config_file: str):
             click.echo("✅ 配置文件验证通过")
             click.echo(f"📊 包含 {len(tasks)} 个任务")
 
+            # 显示启用的提取器
+            enabled_extractors = []
+            if config.extraction_config.enable_text:
+                enabled_extractors.append("text")
+            if config.extraction_config.enable_links:
+                enabled_extractors.append("links")
+            if config.extraction_config.enable_images:
+                enabled_extractors.append("images")
+            if config.extraction_config.enable_data:
+                enabled_extractors.append("data")
+            if config.extraction_config.enable_form:
+                enabled_extractors.append("form")
+
+            click.echo(f"🔧 启用的提取器: {', '.join(enabled_extractors)}")
+
     except json.JSONDecodeError as e:
         click.echo(f"❌ JSON格式错误: {e}", err=True)
         sys.exit(1)
@@ -324,16 +325,37 @@ def validate(config_file: str):
 @cli.command()
 @click.argument("url")
 @click.option("--output", "-o", help="输出文件路径")
-def quick(url: str, output: Optional[str]):
+@click.option("--enable-links", is_flag=True, help="启用链接提取")
+@click.option("--enable-images", is_flag=True, help="启用图片提取")
+@click.option("--enable-data", is_flag=True, help="启用数据提取")
+def quick(
+    url: str,
+    output: Optional[str],
+    enable_links: bool,
+    enable_images: bool,
+    enable_data: bool,
+):
     """快速爬取单个URL（使用默认配置）"""
 
     async def run_quick():
         try:
             click.echo(f"🚀 快速爬取: {url}")
 
-            result = await quick_crawl(url)
+            # 创建快速配置
+            spider = Spider.quick_create(
+                enable_text=True,
+                enable_links=enable_links,
+                enable_images=enable_images,
+                enable_data=enable_data,
+            )
 
-            output_data = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+            async with spider:
+                result = await spider.crawl(url)
+
+            # 判断成功状态
+            success = "error" not in result
+
+            output_data = json.dumps(result, ensure_ascii=False, indent=2)
 
             if output:
                 with open(output, "w", encoding="utf-8") as f:
@@ -344,12 +366,29 @@ def quick(url: str, output: Optional[str]):
 
             # 显示摘要
             click.echo(f"\n📊 爬取摘要:")
-            click.echo(f"  成功: {result.success}")
-            click.echo(f"  内容长度: {result.content_length}")
-            if result.has_links:
-                click.echo(f"  链接数: {result.total_links}")
-            if result.has_images:
-                click.echo(f"  图片数: {result.total_images}")
+            click.echo(f"  成功: {success}")
+            click.echo(f"  提取器: {result.get('extractors_used', [])}")
+            click.echo(f"  耗时: {result.get('extraction_time', 0):.2f}秒")
+
+            # 显示各提取器结果统计
+            results = result.get("results", {})
+            for extractor_name, extractor_result in results.items():
+                if (
+                    isinstance(extractor_result, dict)
+                    and "error" not in extractor_result
+                ):
+                    if extractor_name == "text":
+                        content_length = len(extractor_result.get("content", ""))
+                        click.echo(f"  文本长度: {content_length}字符")
+                    elif extractor_name == "links":
+                        link_count = extractor_result.get("total_links", 0)
+                        click.echo(f"  链接数量: {link_count}")
+                    elif extractor_name == "images":
+                        image_count = extractor_result.get("total_images", 0)
+                        click.echo(f"  图片数量: {image_count}")
+                    elif extractor_name == "data":
+                        stats = extractor_result.get("stats", {})
+                        click.echo(f"  结构化数据: {stats}")
 
         except Exception as e:
             click.echo(f"❌ 快速爬取失败: {e}", err=True)
@@ -358,7 +397,6 @@ def quick(url: str, output: Optional[str]):
     asyncio.run(run_quick())
 
 
-# 保留一些实用的工具命令
 @cli.command()
 @click.argument("urls", nargs=-1)
 def validate_urls(urls):

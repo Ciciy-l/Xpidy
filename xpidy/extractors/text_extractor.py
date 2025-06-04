@@ -1,234 +1,220 @@
 """
-文本数据提取器
+文本内容提取器
 """
 
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional, Union
 
-from loguru import logger
 from playwright.async_api import Page
+from pydantic import Field
 
-from ..core.config import ExtractionConfig
-from ..core.llm_processor import LLMProcessor
-from .base_extractor import BaseExtractor
+from .base_extractor import BaseExtractor, BaseExtractorConfig
+
+
+class TextExtractorConfig(BaseExtractorConfig):
+    """文本提取器配置"""
+
+    # 内容选择器
+    content_selectors: List[str] = Field(
+        default_factory=list, description="内容选择器列表"
+    )
+    exclude_selectors: List[str] = Field(
+        default_factory=list, description="排除的选择器列表"
+    )
+
+    # 清理配置
+    remove_scripts: bool = Field(default=True, description="移除脚本标签")
+    remove_styles: bool = Field(default=True, description="移除样式标签")
+    remove_comments: bool = Field(default=True, description="移除HTML注释")
+    preserve_html_structure: bool = Field(default=False, description="保留HTML结构")
+
+    # 提取配置
+    extract_metadata: bool = Field(default=True, description="提取页面元数据")
+    min_text_length: int = Field(default=10, description="最小文本长度")
+    include_hidden_text: bool = Field(default=False, description="包含隐藏文本")
 
 
 class TextExtractor(BaseExtractor):
-    """文本数据提取器"""
+    """文本内容提取器"""
 
     def __init__(
-        self, config: ExtractionConfig, llm_processor: Optional[LLMProcessor] = None
+        self, config: Optional[TextExtractorConfig] = None, llm_processor=None
     ):
         super().__init__(config)
         self.llm_processor = llm_processor
 
+    @classmethod
+    def get_default_config(cls) -> TextExtractorConfig:
+        """获取默认配置"""
+        return TextExtractorConfig()
+
     async def extract(self, page: Page, **kwargs) -> Dict[str, Any]:
-        """提取文本数据"""
-        try:
-            result = {}
+        """提取文本内容"""
+        current_url = page.url
 
-            # 提取基本内容
-            if self.config.extract_text:
-                content = await self._get_page_content(page)
-                result["content"] = content
+        # 应用页面清理
+        await self._clean_page(page)
 
-                # 如果启用 LLM 处理
-                if self.config.enable_llm_processing and self.llm_processor:
-                    try:
-                        # 获取自定义提示词参数
-                        custom_prompt = kwargs.get("custom_prompt")
-                        prompt_name = kwargs.get("prompt_name", "extract_text")
-                        template_vars = kwargs.get("template_vars", {})
+        # 提取文本内容
+        content = await self._extract_text_content(page)
 
-                        # 使用 LLM 处理内容
-                        processed_content = await self.llm_processor.process(
-                            content=content,
-                            prompt_name=prompt_name,
-                            custom_prompt=custom_prompt,
-                            **template_vars,
-                        )
-                        result["processed_content"] = processed_content
+        # 提取元数据
+        metadata = {}
+        if self.config.extract_metadata:
+            metadata = await self._extract_metadata(page)
 
-                        logger.info("LLM 处理完成，已添加处理后的内容")
+        result = {
+            "url": current_url,
+            "content": content,
+            "metadata": metadata,
+            "timestamp": time.time(),
+            "extraction_method": "text_extractor",
+            "content_length": len(content),
+            "llm_processed": False,
+        }
 
-                    except Exception as e:
-                        logger.warning(f"LLM 处理失败，跳过: {e}")
-                        result["llm_error"] = str(e)
+        # LLM处理（如果配置了）
+        if self.llm_processor and content:
+            try:
+                processed_content = await self.llm_processor.process_content(content)
+                if processed_content:
+                    result["content"] = processed_content
+                    result["llm_processed"] = True
+            except Exception as e:
+                result["llm_error"] = str(e)
 
-            # 提取其他数据
-            if self.config.extract_links:
-                result["links"] = await self._extract_links(page)
-
-            if self.config.extract_images:
-                result["images"] = await self._extract_images(page)
-
-            if self.config.extract_metadata:
-                result["metadata"] = await self._extract_metadata(page)
-
-            # 添加页面信息
-            result["url"] = page.url
-            result["timestamp"] = __import__("time").time()
-
-            logger.info(f"文本提取完成，URL: {page.url}")
-            return result
-
-        except Exception as e:
-            logger.error(f"文本提取失败: {e}")
-            raise
+        return result
 
     async def extract_with_selectors(
         self, page: Page, selectors: Dict[str, str], **kwargs
     ) -> Dict[str, Any]:
-        """使用指定选择器提取文本"""
-        try:
-            result = {}
+        """使用选择器提取特定文本"""
+        current_url = page.url
+        extracted_data = {}
 
-            for name, selector in selectors.items():
-                try:
-                    elements = page.locator(selector)
-                    count = await elements.count()
-
-                    if count == 0:
-                        result[name] = None
-                    elif count == 1:
-                        text = await elements.text_content()
-                        result[name] = await self._clean_text(text or "")
+        for name, selector in selectors.items():
+            try:
+                elements = await page.query_selector_all(selector)
+                if elements:
+                    if len(elements) == 1:
+                        text = await elements[0].text_content()
+                        extracted_data[name] = await self._clean_text(text or "")
                     else:
                         texts = []
-                        for i in range(count):
-                            element = elements.nth(i)
+                        for element in elements:
                             text = await element.text_content()
                             if text:
                                 texts.append(await self._clean_text(text))
-                        result[name] = texts
+                        extracted_data[name] = texts
+                else:
+                    extracted_data[name] = ""
+            except Exception as e:
+                extracted_data[name] = ""
 
-                except Exception as e:
-                    logger.warning(f"选择器 {selector} 提取失败: {e}")
-                    result[name] = None
+        # 基础结果
+        result = {
+            "url": current_url,
+            "timestamp": time.time(),
+            "extraction_method": "selector_based",
+            "llm_processed": False,
+            **extracted_data,
+        }
 
-            # 如果启用 LLM 处理
-            if self.config.enable_llm_processing and self.llm_processor:
+        # LLM处理（如果需要）
+        if self.llm_processor and kwargs.get("llm_prompt"):
+            try:
+                # 准备LLM输入
+                content_for_llm = " ".join(str(v) for v in extracted_data.values() if v)
+
+                if content_for_llm:
+                    processed = await self.llm_processor.process(
+                        content=content_for_llm, custom_prompt=kwargs.get("llm_prompt")
+                    )
+                    result["llm_processed"] = processed
+                    result["llm_error"] = None
+            except Exception as e:
+                result["llm_error"] = str(e)
+
+        return result
+
+    async def _clean_page(self, page: Page):
+        """清理页面内容"""
+        if self.config.remove_scripts:
+            await page.evaluate(
+                "() => document.querySelectorAll('script').forEach(el => el.remove())"
+            )
+
+        if self.config.remove_styles:
+            await page.evaluate(
+                "() => document.querySelectorAll('style').forEach(el => el.remove())"
+            )
+
+        if self.config.remove_comments:
+            await page.evaluate(
+                """
+                () => {
+                    const walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_COMMENT,
+                        null,
+                        false
+                    );
+                    const comments = [];
+                    let node;
+                    while (node = walker.nextNode()) {
+                        comments.push(node);
+                    }
+                    comments.forEach(comment => comment.remove());
+                }
+            """
+            )
+
+        # 移除排除的元素
+        for selector in self.config.exclude_selectors:
+            try:
+                await page.evaluate(
+                    f"""
+                    () => document.querySelectorAll('{selector}').forEach(el => el.remove())
+                """
+                )
+            except Exception:
+                continue
+
+    async def _extract_text_content(self, page: Page) -> str:
+        """提取文本内容"""
+        content_parts = []
+
+        # 使用指定的内容选择器
+        if self.config.content_selectors:
+            for selector in self.config.content_selectors:
                 try:
-                    # 合并所有提取的文本
-                    all_text = []
-                    for key, value in result.items():
-                        if isinstance(value, str) and value:
-                            all_text.append(f"{key}: {value}")
-                        elif isinstance(value, list):
-                            all_text.extend([f"{key}: {v}" for v in value if v])
-
-                    content = "\n".join(all_text)
-
-                    if content:
-                        # 获取自定义提示词参数
-                        custom_prompt = kwargs.get("custom_prompt")
-                        prompt_name = kwargs.get("prompt_name", "extract_data")
-                        template_vars = kwargs.get("template_vars", {})
-
-                        # 使用 LLM 处理内容
-                        processed_content = await self.llm_processor.process(
-                            content=content,
-                            prompt_name=prompt_name,
-                            custom_prompt=custom_prompt,
-                            **template_vars,
-                        )
-                        result["llm_processed"] = processed_content
-
-                except Exception as e:
-                    logger.warning(f"LLM 处理失败: {e}")
-                    result["llm_error"] = str(e)
-
-            # 添加元信息
-            result["url"] = page.url
-            result["timestamp"] = __import__("time").time()
-            result["extraction_method"] = "selectors"
-
-            logger.info(f"选择器文本提取完成，URL: {page.url}")
-            return result
-
-        except Exception as e:
-            logger.error(f"选择器文本提取失败: {e}")
-            raise
-
-    async def extract_article(self, page: Page, **kwargs) -> Dict[str, Any]:
-        """提取文章内容（自动检测文章结构）"""
-        try:
-            # 常见的文章选择器
-            article_selectors = [
-                "article",
-                "[role='main']",
-                ".content",
-                ".article-content",
-                ".post-content",
-                ".entry-content",
-                "#content",
-                "main",
-            ]
-
-            content = ""
-            for selector in article_selectors:
-                try:
-                    element = page.locator(selector).first
-                    if await element.count() > 0:
+                    elements = await page.query_selector_all(selector)
+                    for element in elements:
                         text = await element.text_content()
-                        if text and len(text) > len(content):
-                            content = text
+                        if text and len(text.strip()) >= self.config.min_text_length:
+                            content_parts.append(await self._clean_text(text))
                 except Exception:
                     continue
-
-            if not content:
-                # 如果没有找到文章容器，使用整个页面内容
-                content = await self._get_page_content(page)
-
-            content = await self._clean_text(content)
-
-            result = {
-                "content": content,
-                "url": page.url,
-                "timestamp": __import__("time").time(),
-                "extraction_method": "article_detection",
-            }
-
-            # 提取标题
+        else:
+            # 提取整个body的文本
             try:
-                title_selectors = [
-                    "h1",
-                    "title",
-                    ".title",
-                    ".article-title",
-                    ".post-title",
-                ]
-                for selector in title_selectors:
-                    title_element = page.locator(selector).first
-                    if await title_element.count() > 0:
-                        title = await title_element.text_content()
-                        if title:
-                            result["title"] = await self._clean_text(title)
-                            break
+                if self.config.preserve_html_structure:
+                    content = await page.inner_html("body")
+                else:
+                    content = await page.text_content("body")
+
+                if content and len(content.strip()) >= self.config.min_text_length:
+                    content_parts.append(await self._clean_text(content))
             except Exception:
                 pass
 
-            # 如果启用 LLM 处理
-            if self.config.enable_llm_processing and self.llm_processor and content:
-                try:
-                    custom_prompt = kwargs.get("custom_prompt")
-                    prompt_name = kwargs.get("prompt_name", "extract_text")
-                    template_vars = kwargs.get("template_vars", {})
+        return "\n\n".join(content_parts)
 
-                    processed_content = await self.llm_processor.process(
-                        content=content,
-                        prompt_name=prompt_name,
-                        custom_prompt=custom_prompt,
-                        **template_vars,
-                    )
-                    result["processed_content"] = processed_content
+    def _apply_custom_filters(self, item: Dict[str, Any], **filters) -> bool:
+        """应用自定义过滤器"""
+        # 文本长度过滤
+        content = item.get("content", "")
+        if len(content.strip()) < self.config.min_text_length:
+            return False
 
-                except Exception as e:
-                    logger.warning(f"LLM 处理失败: {e}")
-                    result["llm_error"] = str(e)
-
-            logger.info(f"文章提取完成，URL: {page.url}")
-            return result
-
-        except Exception as e:
-            logger.error(f"文章提取失败: {e}")
-            raise
+        return True
