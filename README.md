@@ -2,7 +2,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyPI version](https://badge.fury.io/py/xpidy.svg)](https://badge.fury.io/py/xpidy)
-[![Downloads](https://pepy.tech/badge/xpidy)](https://pepy.tech/project/xpidy)
+[![PyPI Downloads](https://static.pepy.tech/badge/xpidy)](https://pepy.tech/projects/xpidy)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Playwright](https://img.shields.io/badge/playwright-enabled-brightgreen.svg)](https://playwright.dev/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
