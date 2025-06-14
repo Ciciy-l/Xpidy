@@ -21,7 +21,7 @@
 - 📋 **全面提取** - 文本、链接、图片、表格、表单等多种数据
 - 🔍 **灵活选择器** - 支持CSS选择器和XPath范围限制
 - 🛡️ **反爬虫** - 内置隐身模式和随机延迟
-- 🔧 **CLI工具** - 完整的命令行工具支持
+- 🔧 **编程API** - 简洁易用的Python编程接口
 
 ## 🚀 快速开始
 
@@ -43,9 +43,6 @@ playwright install
 ### 验证安装
 
 ```bash
-# 验证xpidy CLI工具
-xpidy --version
-
 # 验证Python导入
 python -c "from xpidy import Spider; print('Xpidy安装成功！')"
 ```
@@ -143,86 +140,6 @@ async def main():
 asyncio.run(main())
 ```
 
-## 📋 CLI使用指南
-
-### 基础命令
-
-```bash
-# 1. 生成配置模板
-xpidy init basic --output my_config.json
-
-# 2. 验证配置文件
-xpidy validate my_config.json
-
-# 3. 执行爬取任务
-xpidy run my_config.json --output results.json
-
-# 4. 快速爬取单个URL
-xpidy quick https://example.com --enable-links --enable-images --enable-data
-```
-
-### 配置文件示例
-
-```json
-{
-  "spider_config": {
-    "headless": true,
-    "timeout": 30000,
-    "enable_stealth": true,
-    "delay": 1.0,
-    "retry_times": 3
-  },
-  "extraction_config": {
-    "enable_text": true,
-    "enable_links": true,
-    "enable_images": true,
-    "enable_data": true,
-    "text_config": {
-      "min_text_length": 10,
-      "extract_metadata": true
-    },
-    "links_config": {
-      "include_internal": true,
-      "include_external": true,
-      "max_items": 50
-    },
-    "images_config": {
-      "min_width": 100,
-      "min_height": 100,
-      "max_items": 20,
-      "allowed_formats": ["jpg", "png", "gif"]
-    }
-  },
-  "tasks": [
-    {
-      "url": "https://example.com",
-      "name": "example_site"
-    }
-  ]
-}
-```
-
-### 可用模板
-
-```bash
-# 基础文本提取
-xpidy init basic
-
-# 链接分析  
-xpidy init links
-
-# 图片分析
-xpidy init images
-
-# 全面数据提取
-xpidy init comprehensive
-
-# 结构化数据提取
-xpidy init data
-
-# 表单数据提取
-xpidy init form
-```
 
 ## 🔧 高级功能
 
@@ -347,7 +264,7 @@ Xpidy/
 │   │   ├── proxy.py            # 代理工具
 │   │   ├── retry.py            # 重试工具
 │   │   └── __init__.py         # 工具模块导出
-│   ├── cli.py                  # 配置驱动的命令行工具
+
 │   └── __init__.py             # 包主入口
 ├── examples/                   # 示例代码
 ├── tests/                      # 测试文件
@@ -461,10 +378,8 @@ source .venv/bin/activate  # Linux/Mac
 # 运行测试
 uv run pytest tests/ -v
 
-# 测试CLI工具
-uv run xpidy init basic --output test_config.json
-uv run xpidy validate test_config.json
-uv run xpidy run test_config.json
+# 运行示例代码
+uv run python examples/basic_usage.py
 
 # 代码格式化
 uvx isort .
